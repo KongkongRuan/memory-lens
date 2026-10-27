@@ -29,10 +29,12 @@ pub struct SpdDocument {
 #[derive(Clone, Debug)]
 pub struct SpdModule {
     pub bus: i32,
+    pub bus_name: String,
     pub address: u8,
     pub memory_type: String,
     pub capacity_gb: f32,
     pub manufacturer: String,
+    pub dram_manufacturer: String,
     pub part_number: String,
     pub serial_number: String,
     pub raw: Vec<u8>,
@@ -85,6 +87,8 @@ struct BridgeResponse {
 #[serde(rename_all = "camelCase")]
 struct BridgeModule {
     bus: i32,
+    #[serde(default)]
+    bus_name: String,
     address: u8,
     #[serde(default)]
     memory_type: String,
@@ -92,6 +96,8 @@ struct BridgeModule {
     capacity_gb: f32,
     #[serde(default)]
     manufacturer: String,
+    #[serde(default)]
+    dram_manufacturer: String,
     #[serde(default)]
     part_number: String,
     #[serde(default)]
@@ -361,10 +367,12 @@ fn with_stderr(mut message: String, stderr: &[u8]) -> String {
 fn convert_module(module: BridgeModule) -> SpdModule {
     let BridgeModule {
         bus,
+        bus_name,
         address,
         memory_type,
         capacity_gb,
         manufacturer,
+        dram_manufacturer,
         part_number,
         serial_number,
         raw_hex,
@@ -374,10 +382,12 @@ fn convert_module(module: BridgeModule) -> SpdModule {
 
     let mut converted = SpdModule {
         bus,
+        bus_name,
         address,
         memory_type,
         capacity_gb,
         manufacturer,
+        dram_manufacturer,
         part_number,
         serial_number,
         raw: Vec::new(),
@@ -407,10 +417,21 @@ fn convert_module(module: BridgeModule) -> SpdModule {
         }
     };
 
-    if raw_is_valid && is_ddr5(&converted.memory_type) {
-        match decode_ddr5_profiles(&converted.raw) {
-            Ok(profiles) => converted.profiles = profiles,
-            Err(error) => append_module_error(&mut converted.error, error),
+    if raw_is_valid {
+        if is_ddr5(&converted.memory_type) {
+            match decode_ddr5_profiles(&converted.raw) {
+                Ok(profiles) => converted.profiles = profiles,
+                Err(error) => append_module_error(&mut converted.error, error),
+            }
+        } else if is_ddr3(&converted.memory_type) || is_ddr4(&converted.memory_type) {
+            let crc_valid = match verify_legacy_crc(&converted.raw) {
+                Ok(valid) => Some(valid),
+                Err(error) => {
+                    append_module_error(&mut converted.error, error);
+                    None
+                }
+            };
+            converted.profiles = vec![decode_legacy_jedec_profile(&converted, crc_valid)];
         }
     }
 
@@ -448,6 +469,237 @@ fn hex_digit(byte: u8) -> Option<u8> {
 
 fn is_ddr5(memory_type: &str) -> bool {
     memory_type.trim().to_ascii_uppercase().contains("DDR5")
+}
+
+fn is_ddr4(memory_type: &str) -> bool {
+    memory_type.trim().to_ascii_uppercase().contains("DDR4")
+}
+
+fn is_ddr3(memory_type: &str) -> bool {
+    memory_type.trim().to_ascii_uppercase().contains("DDR3")
+}
+
+fn verify_legacy_crc(raw: &[u8]) -> Result<bool, String> {
+    if raw.len() < 128 {
+        return Err(format!(
+            "SPD 长度不足以校验 JEDEC CRC：至少需要 128 字节，实际为 {} 字节",
+            raw.len()
+        ));
+    }
+    let computed = spdr::crc16(&raw[..126]);
+    let stored = u16::from_le_bytes([raw[126], raw[127]]);
+    Ok(computed == stored)
+}
+
+fn decode_legacy_jedec_profile(module: &SpdModule, crc_valid: Option<bool>) -> TimingProfile {
+    let tck = timing_ps(module, "MinimumCycleTime");
+    let taa = timing_ps(module, "MinimumCASLatencyTime");
+    let trcd = timing_ps(module, "MinimumRASToCASDelayTime");
+    let trp = timing_ps(module, "MinimumRowPrechargeDelayTime");
+    let tras = timing_ps(module, "MinimumActiveToPrechargeDelayTime");
+    let trc = timing_ps(module, "MinimumActiveToActiveRefreshDelayTime");
+    let twr = timing_ps(module, "MinimumWriteRecoveryTime");
+    let tfaw = timing_ps(module, "MinimumFourActivateWindowTime");
+    let cas = parse_cas_list(timing_value(module, "CASLatenciesSupported"));
+
+    let cl = tck.zip(taa).and_then(|(tck, taa)| ceil_cycles(taa, tck));
+    let cl_is_supported = cl.is_some_and(|value| cas.contains(&value));
+    let t_rcd = timing_cycles(trcd, tck);
+    let t_rp = timing_cycles(trp, tck);
+    let t_ras = timing_cycles(tras, tck);
+    let core_timings = if cl_is_supported {
+        match (cl, t_rcd, t_rp, t_ras) {
+            (Some(cl), Some(rcd), Some(rp), Some(ras)) => Some(format!("{cl}-{rcd}-{rp}-{ras}")),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let mut subtitle = PROFILE_SUBTITLE.to_owned();
+    if cl.is_some() && !cl_is_supported {
+        subtitle.push_str("；换算 CL 不在 CAS 支持列表");
+    }
+    if cas.is_empty() {
+        subtitle.push_str("；CAS 支持列表未提供");
+    }
+
+    let mut rows = vec![
+        clock_row_optional(tck),
+        cl_timing_row(taa, if cl_is_supported { cl } else { None }),
+        legacy_row("tRCD", trcd, tck),
+        legacy_row("tRP", trp, tck),
+        legacy_row("tRAS", tras, tck),
+        legacy_row("tRC", trc, tck),
+        legacy_row("tWR", twr, tck),
+    ];
+
+    if is_ddr4(&module.memory_type) {
+        rows.extend([
+            legacy_row(
+                "tRFC1",
+                timing_ps(module, "MinimumRefreshRecoveryDelayTime1"),
+                tck,
+            ),
+            legacy_row(
+                "tRFC2",
+                timing_ps(module, "MinimumRefreshRecoveryDelayTime2"),
+                tck,
+            ),
+            legacy_row(
+                "tRFC4",
+                timing_ps(module, "MinimumRefreshRecoveryDelayTime4"),
+                tck,
+            ),
+            legacy_row(
+                "tRRD_S",
+                timing_ps(module, "MinimumActivateToActivateDelay_DiffGroup"),
+                tck,
+            ),
+            legacy_row(
+                "tRRD_L",
+                timing_ps(module, "MinimumActivateToActivateDelay_SameGroup"),
+                tck,
+            ),
+            legacy_row(
+                "tCCD_L",
+                timing_ps(module, "MinimumCASToCASDelay_SameGroup"),
+                tck,
+            ),
+            legacy_row(
+                "tWTR_S",
+                timing_ps(module, "MinimumWriteToReadTime_DiffGroup"),
+                tck,
+            ),
+            legacy_row(
+                "tWTR_L",
+                timing_ps(module, "MinimumWriteToReadTime_SameGroup"),
+                tck,
+            ),
+        ]);
+    } else {
+        rows.extend([
+            legacy_row(
+                "tRFC",
+                timing_ps(module, "MinimumRefreshRecoveryDelayTime"),
+                tck,
+            ),
+            legacy_row(
+                "tRRD",
+                timing_ps(module, "MinimumActivateToActivateDelayTime"),
+                tck,
+            ),
+            legacy_row("tWTR", timing_ps(module, "MinimumWriteToReadTime"), tck),
+            legacy_row("tRTP", timing_ps(module, "MinimumReadToPrechargeTime"), tck),
+        ]);
+    }
+    rows.push(legacy_row("tFAW", tfaw, tck));
+
+    TimingProfile {
+        title: "JEDEC 基础时序".to_owned(),
+        subtitle,
+        core_timings: core_timings.unwrap_or_else(|| UNAVAILABLE.to_owned()),
+        data_rate_mt_s: tck.and_then(data_rate_from_tck),
+        voltage_summary: String::new(),
+        crc_valid,
+        rows,
+    }
+}
+
+fn timing_value<'a>(module: &'a SpdModule, name: &str) -> Option<&'a str> {
+    module
+        .legacy_timings
+        .iter()
+        .find(|timing| timing.name == name)
+        .map(|timing| timing.value.as_str())
+}
+
+fn timing_ps(module: &SpdModule, name: &str) -> Option<u32> {
+    parse_ns_to_ps(timing_value(module, name))
+}
+
+fn parse_ns_to_ps(value: Option<&str>) -> Option<u32> {
+    let nanoseconds: f64 = value?.trim().parse().ok()?;
+    if !nanoseconds.is_finite() || nanoseconds <= 0.0 {
+        return None;
+    }
+    let picoseconds = (nanoseconds * 1000.0).round();
+    if picoseconds < 1.0 || picoseconds > f64::from(u32::MAX) {
+        return None;
+    }
+    Some(picoseconds as u32)
+}
+
+fn parse_cas_list(value: Option<&str>) -> Vec<u32> {
+    let mut values: Vec<u32> = value
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|part| part.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .collect();
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+fn data_rate_from_tck(tck_ps: u32) -> Option<u32> {
+    if tck_ps == 0 {
+        return None;
+    }
+    let rate = (2_000_000.0 / f64::from(tck_ps)).round();
+    if rate < 1.0 || rate > f64::from(u32::MAX) {
+        return None;
+    }
+    Some(rate as u32)
+}
+
+fn timing_cycles(value_ps: Option<u32>, tck_ps: Option<u32>) -> Option<u32> {
+    value_ps
+        .zip(tck_ps)
+        .and_then(|(value, tck)| ceil_cycles(value, tck))
+}
+
+fn ceil_cycles(value_ps: u32, tck_ps: u32) -> Option<u32> {
+    if tck_ps == 0 {
+        return None;
+    }
+    let value = u64::from(value_ps);
+    let tck = u64::from(tck_ps);
+    Some(((value + tck - 1) / tck) as u32)
+}
+
+fn clock_row_optional(tck_ps: Option<u32>) -> TimingRow {
+    TimingRow {
+        parameter: "tCK".to_owned(),
+        cycles: "1".to_owned(),
+        time: tck_ps
+            .map(format_ps)
+            .unwrap_or_else(|| UNAVAILABLE.to_owned()),
+    }
+}
+
+fn cl_timing_row(value_ps: Option<u32>, cl: Option<u32>) -> TimingRow {
+    TimingRow {
+        parameter: "tAA/CL".to_owned(),
+        cycles: cl
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| UNAVAILABLE.to_owned()),
+        time: value_ps
+            .map(format_ps)
+            .unwrap_or_else(|| UNAVAILABLE.to_owned()),
+    }
+}
+
+fn legacy_row(parameter: &str, value_ps: Option<u32>, tck_ps: Option<u32>) -> TimingRow {
+    TimingRow {
+        parameter: parameter.to_owned(),
+        cycles: timing_cycles(value_ps, tck_ps)
+            .map(|cycles| cycles.to_string())
+            .unwrap_or_else(|| UNAVAILABLE.to_owned()),
+        time: value_ps
+            .map(format_ps)
+            .unwrap_or_else(|| UNAVAILABLE.to_owned()),
+    }
 }
 
 fn append_module_error(slot: &mut Option<String>, message: String) {
@@ -636,12 +888,7 @@ fn pair_row(parameter: &str, pair: TimingPair, tck: u32) -> TimingRow {
 }
 
 fn minimum_cycles(value: Picoseconds, tck: u32) -> Option<u32> {
-    if tck == 0 {
-        return None;
-    }
-    let value = u64::from(value.picoseconds());
-    let tck = u64::from(tck);
-    Some(((value + tck - 1) / tck) as u32)
+    ceil_cycles(value.picoseconds(), tck)
 }
 
 fn rated_cycles(value: Picoseconds, tck: u32) -> Option<u32> {
@@ -667,4 +914,125 @@ fn format_ps(ps: u32) -> String {
     }
     time.push_str(" ns");
     time
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_module(memory_type: &str, timings: &[(&str, &str)]) -> SpdModule {
+        SpdModule {
+            bus: 0,
+            bus_name: "SMBus".to_owned(),
+            address: 0x50,
+            memory_type: memory_type.to_owned(),
+            capacity_gb: 16.0,
+            manufacturer: "Module Vendor".to_owned(),
+            dram_manufacturer: "DRAM Vendor".to_owned(),
+            part_number: "TEST-PART".to_owned(),
+            serial_number: "TEST-SERIAL".to_owned(),
+            raw: Vec::new(),
+            profiles: Vec::new(),
+            legacy_timings: timings
+                .iter()
+                .map(|(name, value)| LegacyTiming {
+                    name: (*name).to_owned(),
+                    value: (*value).to_owned(),
+                })
+                .collect(),
+            error: None,
+        }
+    }
+
+    fn valid_legacy_raw() -> Vec<u8> {
+        let mut raw = vec![0u8; 256];
+        for (index, byte) in raw.iter_mut().take(126).enumerate() {
+            *byte = (index as u8).wrapping_mul(17).wrapping_add(3);
+        }
+        let crc = spdr::crc16(&raw[..126]);
+        raw[126..128].copy_from_slice(&crc.to_le_bytes());
+        raw
+    }
+
+    #[test]
+    fn legacy_crc_covers_first_126_bytes() {
+        let mut raw = valid_legacy_raw();
+        assert_eq!(verify_legacy_crc(&raw), Ok(true));
+
+        raw[125] ^= 0x01;
+        assert_eq!(verify_legacy_crc(&raw), Ok(false));
+        assert!(verify_legacy_crc(&raw[..127]).is_err());
+    }
+
+    #[test]
+    fn converts_nanoseconds_cycles_and_data_rate() {
+        assert_eq!(parse_ns_to_ps(Some("0.625")), Some(625));
+        assert_eq!(parse_ns_to_ps(Some("13.75")), Some(13_750));
+        assert_eq!(parse_ns_to_ps(Some("bad")), None);
+        assert_eq!(parse_ns_to_ps(Some("0")), None);
+        assert_eq!(ceil_cycles(13_750, 625), Some(22));
+        assert_eq!(ceil_cycles(13_751, 625), Some(23));
+        assert_eq!(data_rate_from_tck(625), Some(3200));
+        assert_eq!(data_rate_from_tck(750), Some(2667));
+        assert_eq!(parse_cas_list(Some("24, 22, 24")), vec![22, 24]);
+    }
+
+    #[test]
+    fn decodes_ddr4_jedec_core_timings() {
+        let module = legacy_module(
+            "DDR4",
+            &[
+                ("MinimumCycleTime", "0.625"),
+                ("MinimumCASLatencyTime", "13.75"),
+                ("MinimumRASToCASDelayTime", "13.75"),
+                ("MinimumRowPrechargeDelayTime", "13.75"),
+                ("MinimumActiveToPrechargeDelayTime", "32"),
+                ("MinimumActiveToActiveRefreshDelayTime", "45.75"),
+                ("MinimumWriteRecoveryTime", "15"),
+                ("MinimumRefreshRecoveryDelayTime1", "350"),
+                ("MinimumActivateToActivateDelay_DiffGroup", "3.75"),
+                ("MinimumActivateToActivateDelay_SameGroup", "6.25"),
+                ("MinimumCASToCASDelay_SameGroup", "6.25"),
+                ("MinimumWriteToReadTime_DiffGroup", "2.5"),
+                ("MinimumWriteToReadTime_SameGroup", "7.5"),
+                ("MinimumFourActivateWindowTime", "30"),
+                ("CASLatenciesSupported", "22, 24"),
+            ],
+        );
+
+        let profile = decode_legacy_jedec_profile(&module, Some(true));
+        assert_eq!(profile.core_timings, "22-22-22-52");
+        assert_eq!(profile.data_rate_mt_s, Some(3200));
+        assert!(profile
+            .rows
+            .iter()
+            .any(|row| row.parameter == "tRFC1" && row.time == "350 ns"));
+    }
+
+    #[test]
+    fn missing_or_unsupported_cl_is_not_fabricated() {
+        let missing = legacy_module(
+            "DDR4",
+            &[
+                ("MinimumCycleTime", "0.625"),
+                ("CASLatenciesSupported", "22, 24"),
+            ],
+        );
+        assert_eq!(
+            decode_legacy_jedec_profile(&missing, Some(true)).core_timings,
+            UNAVAILABLE
+        );
+
+        let unsupported = legacy_module(
+            "DDR4",
+            &[
+                ("MinimumCycleTime", "0.625"),
+                ("MinimumCASLatencyTime", "14"),
+                ("CASLatenciesSupported", "22, 24"),
+            ],
+        );
+        let profile = decode_legacy_jedec_profile(&unsupported, Some(true));
+        assert_eq!(profile.core_timings, UNAVAILABLE);
+        assert!(profile.subtitle.contains("CL 不在 CAS 支持列表"));
+    }
 }

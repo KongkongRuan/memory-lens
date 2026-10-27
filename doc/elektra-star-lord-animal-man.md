@@ -4,13 +4,20 @@
 
 把现有半成品修到可构建、可运行、信息更完整的状态；DDR3/DDR4 复用现有 RAMSPDToolkit 的 JEDEC 解码，DDR5 保留现有 `spdr` 解码，不新增依赖。现有机器的历史 SPD 输出显示 PawnIO/兼容 SMBus 曾不可用，因此真实 SPD 硬件读取只能在机器当前状态允许时验收，不能用模拟数据冒充。
 
-## 当前状态
+## 开工前状态
 
-- `cargo check --all-targets` 当前有 5 处 `.size()` 浮点字面量错误（`src/memory_page.rs` 第 622、639、675、678、717 行）和 1 处未使用导入；不是旧版方案写的 20 处。
+- `cargo check --all-targets` 当时有 5 处 `.size()` 浮点字面量错误（`src/memory_page.rs` 第 622、639、675、678、717 行）和 1 处未使用导入；不是旧版方案写的 20 处。
 - `dotnet build spd-bridge/MemoryLens.SpdBridge.csproj --no-restore` 可成功构建。
-- `src/spd.rs` 目前只解析 DDR5；`spd-bridge/Program.cs` 已通过反射输出 DDR3/DDR4 timing 属性、`busName` 和 `dramManufacturer`，C# 侧只需在必要时补齐字段契约。
+- `src/spd.rs` 当时只解析 DDR5；`spd-bridge/Program.cs` 已通过反射输出 DDR3/DDR4 timing 属性、`busName` 和 `dramManufacturer`，C# 侧只需在必要时补齐字段契约。
 - WMI 的序列号已经读取，但界面尚未显示。
-- 本机当前为 DDR5 平台，未检测到 PawnIO，当前进程也非管理员；本轮不能把真实 SPD 硬件读取作为完成条件。
+- 本机为 DDR5 平台，开工时未检测到 PawnIO，当前进程也非管理员；真实 SPD 硬件读取需要在取得管理员权限并安装驱动后验收。
+
+## 真机验证结果（2026-10-27）
+
+- 已取得管理员权限并安装 PawnIO 2.2.0；安装旧服务曾要求重启清理，重启后安装成功。
+- 已读取本机真实 DDR5 SPD：Kingbank 16 GB、i801 总线、SPD 地址 0x51；序列号与 WMI 匹配，插槽关联为 `Controller0-ChannelB-DIMM1`。
+- 修复原始 SPD 64 字节 SMBus 块读取导致尾部为零的问题后，CRC 校验通过，JEDEC 核心时序显示为 `40-40-40-77`、`DDR5-4800`。
+- DDR3/DDR4 实机、DDR4 XMP 2.0 和部分厂商字段（例如该模块的型号由工具包返回空值）仍需单独验证或保持“未提供”。
 
 ## 实施步骤
 
@@ -23,6 +30,7 @@
 ### 2. 接通 DDR3/DDR4 JEDEC 详细时序
 
 - 继续使用桥接现有的 `timings` 名称/值数组；`ReadTimings` 已输出 `DDR3Timings` / `DDR4Timings` 的 decimal 属性和 `CASLatenciesSupported`。Rust 侧按名称查找，不依赖数组顺序。
+- 原始 SPD 必须按不超过 32 字节的块读取；真机验证发现 64 字节 SMBus 块读取可能返回“长度正确但尾部为零”的缓冲区，导致 DDR5 CRC 和时序解码错误。
 - 明确规定桥接字段单位与格式：
   - timing 值为 invariant culture 的十进制纳秒字符串；
   - `CASLatenciesSupported` 为逗号分隔的整数时钟列表；

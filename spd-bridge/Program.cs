@@ -134,7 +134,7 @@ namespace MemoryLens.SpdBridge
                     var module = new SpdModule
                     {
                         Bus = busIndex,
-                        BusName = bus.DeviceName,
+                        BusName = bus.DeviceName ?? "",
                         Address = address,
                         MemoryType = detector.SPDMemoryType.ToString(),
                     };
@@ -167,9 +167,12 @@ namespace MemoryLens.SpdBridge
             int length = accessor is DDR5Accessor ? 1024 : accessor is DDR4Accessor ? 512 : 256;
             using (var stream = new MemoryStream())
             {
-                for (ushort offset = 0; offset < length; offset += 64)
+                // SMBus block reads are limited to 32 bytes. Asking for 64 bytes
+                // can return a successful-looking buffer with the tail zeroed,
+                // which corrupts DDR4/DDR5 raw SPD and CRC/timing decoding.
+                for (ushort offset = 0; offset < length; offset += 32)
                 {
-                    byte count = (byte)Math.Min(64, length - offset);
+                    byte count = (byte)Math.Min(32, length - offset);
                     byte[] block = accessor.At(offset, count);
                     if (block == null || block.Length != count)
                         throw new InvalidDataException("SPD 返回的数据长度不正确。 ");
