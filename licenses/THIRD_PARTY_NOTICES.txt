@@ -1,0 +1,32 @@
+Memory Lens 第三方组件说明
+
+PawnIO 2.2.0 / PawnIO Setup 2.2.0
+来源：https://pawnio.eu/ 和 https://github.com/namazso/PawnIO
+版权：namazso <admin@namazso.eu>
+许可：GNU GPL v2 或更新版本，附设备 IOCTL 独立模块特别例外；完整许可及例外见 PawnIO-LICENSE.txt。
+对应公开源代码：https://github.com/namazso/PawnIO
+本应用将官方安装程序作为独立、未修改的安装包调用，不使用 unrestricted 版本。应用不链接 PawnIOLib，只通过 Windows DeviceIoControl 与驱动通信。PawnIO 服务常驻，官方安装程序提供卸载入口。
+
+RAMSPDToolkit 1.6.4
+来源：https://github.com/Blacktempel/RAMSPDToolkit
+版权：Florian K.
+许可：Mozilla Public License 2.0，见 RAMSPDToolkit-LICENSE.txt。
+包来源：https://www.nuget.org/packages/RAMSPDToolkit/1.6.4
+
+BlackSharp.Core 1.2.5
+来源：https://github.com/Blacktempel/BlackSharp
+版权：Florian K.
+许可：Mozilla Public License 2.0，见 BlackSharp.Core-LICENSE.txt。
+
+LibreHardwareMonitor 的 PawnIO SMBus 模块（随 RAMSPDToolkit 提供）
+来源：https://github.com/LibreHardwareMonitor/LibreHardwareMonitor
+许可：Mozilla Public License 2.0，见 RAMSPDToolkit-LICENSE.txt。
+
+spdr 0.1.1
+来源：https://crates.io/crates/spdr 和 https://github.com/The-Open-Memory-Initiative-OMI/spdr
+许可：Apache License 2.0，见 spdr-LICENSE.txt。
+
+Microsoft .NET 组件
+System.Management、System.CodeDom、System.Memory、System.Buffers、System.Numerics.Vectors、System.Runtime.CompilerServices.Unsafe
+来源：https://dot.net/ 和 https://www.nuget.org/
+许可：MIT，见 Microsoft-.NET-LICENSE.txt。
