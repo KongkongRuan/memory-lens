@@ -61,12 +61,15 @@ dotnet build spd-bridge/MemoryLens.SpdBridge.csproj -c Release --no-restore --no
 target\debug\memory-lens.exe
 ```
 
-发布构建：
+单文件发布：
 
 ```powershell
 cargo build --release
-target\release\memory-lens.exe
 ```
+
+生成的文件为 `target\release\memory-lens.exe`，可直接复制到空目录运行。SPD 桥接程序、RAMSPDToolkit、spdr 解析依赖和 PawnIO 安装资源都已嵌入主程序，不依赖同目录下的 DLL 或配置文件。程序运行时会按需把桥接程序解压到系统临时目录。
+
+> SPD 桥接目标为 .NET Framework 4.7.2；Windows 10/11 通常已自带 4.8。除系统组件外，发布目录只需要这一个 `memory-lens.exe`。
 
 普通的内存总览和进程信息不需要管理员权限。使用“内存信息 → 读取详细时序”时，请以管理员身份运行程序；首次读取可能触发官方 PawnIO 安装程序，安装完成后可能需要重启以清理旧驱动服务。
 
@@ -145,7 +148,7 @@ cargo build
 target\debug\memory-lens.exe
 ```
 
-SPD reading requires administrator privileges and installs the pinned, signed PawnIO 2.2.0 driver through its official installer. DDR3/DDR4 hardware and DDR4 XMP 2.0 are not yet hardware-validated.
+Release builds produce a single `memory-lens.exe`; the SPD bridge is embedded and extracted to the system temp directory at runtime. SPD reading requires administrator privileges and installs the pinned, signed PawnIO 2.2.0 driver through its official installer. DDR3/DDR4 hardware and DDR4 XMP 2.0 are not yet hardware-validated.
 
 The project is released under the MIT License. Bundled third-party components remain under their respective licenses; see `licenses/` for details.
 
