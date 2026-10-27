@@ -147,6 +147,10 @@ target\debug\memory-lens.exe
 
 SPD reading requires administrator privileges and installs the pinned, signed PawnIO 2.2.0 driver through its official installer. DDR3/DDR4 hardware and DDR4 XMP 2.0 are not yet hardware-validated.
 
+The project is released under the MIT License. Bundled third-party components remain under their respective licenses; see `licenses/` for details.
+
 ## 许可
 
-本仓库目前未添加项目级 LICENSE 文件。随项目分发或使用的第三方组件及其许可说明见 [`licenses/THIRD_PARTY_NOTICES.txt`](licenses/THIRD_PARTY_NOTICES.txt) 和 `licenses/` 目录。
+本项目采用 [MIT License](LICENSE)。
+
+随项目分发或使用的第三方组件仍受其各自许可约束，详见 [`licenses/THIRD_PARTY_NOTICES.txt`](licenses/THIRD_PARTY_NOTICES.txt) 和 `licenses/` 目录。特别是随程序提供的 PawnIO 安装程序/驱动组件按其 GPLv2+ 及项目声明的例外条款单独授权。

@@ -2,6 +2,7 @@
 name = "memory-lens"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
