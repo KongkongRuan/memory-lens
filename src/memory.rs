@@ -52,6 +52,7 @@ pub enum BenchmarkStage {
     Read,
     Write,
     Copy,
+    Latency,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +68,7 @@ pub struct BenchmarkResult {
     pub read_gib_s: f64,
     pub write_gib_s: f64,
     pub copy_gib_s: f64,
+    pub latency_ns: f64,
     pub samples: u32,
     pub elapsed_seconds: f64,
 }
@@ -82,6 +84,10 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const MIN_AVAILABLE_BYTES: u64 = 256 * MIB;
 const MIN_BUFFER_BYTES: u64 = 32 * MIB;
 const MAX_BUFFER_BYTES: u64 = 256 * MIB;
+const LATENCY_MIN_BYTES: u64 = 32 * MIB;
+const LATENCY_MAX_BYTES: u64 = 64 * MIB;
+const LATENCY_ROUNDS: u32 = 5;
+const LATENCY_STEPS: usize = 1 << 20;
 const SAMPLE_ROUNDS: u32 = 5;
 const CALIBRATION_ATTEMPTS: u32 = 6;
 const RPC_C_AUTHN_WINNT_VALUE: u32 = 10;
@@ -576,14 +582,76 @@ pub fn run_benchmark(
         return Err(BenchmarkError::Cancelled);
     }
 
+    drop(source);
+    drop(destination);
+    let latency_ns = measure_latency(buffer_bytes, cancel.as_ref(), &mut reporter)?;
+
     Ok(BenchmarkResult {
         buffer_bytes,
         read_gib_s,
         write_gib_s,
         copy_gib_s,
+        latency_ns,
         samples: SAMPLE_ROUNDS,
         elapsed_seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+fn measure_latency<F: FnMut(BenchmarkProgress)>(
+    buffer_bytes: u64,
+    cancel: &AtomicBool,
+    reporter: &mut ProgressReporter<F>,
+) -> Result<f64, BenchmarkError> {
+    let target_bytes = (buffer_bytes * 2).clamp(LATENCY_MIN_BYTES, LATENCY_MAX_BYTES);
+    let target_entries = (target_bytes / std::mem::size_of::<u32>() as u64) as usize;
+    let entries = target_entries.next_power_of_two();
+    if entries > u32::MAX as usize {
+        return Err(BenchmarkError::Failed(
+            "内存延迟测试的索引长度溢出".to_owned(),
+        ));
+    }
+
+    let mut next = Vec::new();
+    next.try_reserve_exact(entries).map_err(|error| {
+        BenchmarkError::Failed(format!(
+            "为内存延迟测试预留 {} 项索引失败：{error}",
+            entries
+        ))
+    })?;
+    next.resize(entries, 0u32);
+
+    let mask = (entries - 1) as u64;
+    for (index, slot) in next.iter_mut().enumerate() {
+        *slot = ((index as u64)
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223)
+            & mask) as u32;
+    }
+
+    let mut warmup_index = 0usize;
+    for _ in 0..(LATENCY_STEPS / 4) {
+        warmup_index = next[warmup_index] as usize;
+    }
+    black_box(warmup_index);
+
+    let mut total_ns = 0.0;
+    for round in 0..LATENCY_ROUNDS {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(BenchmarkError::Cancelled);
+        }
+        let started = Instant::now();
+        let mut index = (round as usize * 17) % entries;
+        let mut checksum = 0u64;
+        for _ in 0..LATENCY_STEPS {
+            index = next[index] as usize;
+            checksum = checksum.wrapping_add(index as u64);
+        }
+        black_box(checksum);
+        total_ns += started.elapsed().as_secs_f64() * 1e9 / LATENCY_STEPS as f64;
+        reporter.emit(BenchmarkStage::Latency, round + 1, LATENCY_ROUNDS, true);
+    }
+
+    Ok(total_ns / f64::from(LATENCY_ROUNDS))
 }
 
 fn benchmark_buffer_bytes(available_bytes: u64) -> Option<u64> {

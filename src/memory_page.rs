@@ -25,6 +25,12 @@ const ORANGE: Color32 = Color32::from_rgb(0xFD, 0xB0, 0x22);
 const RED: Color32 = Color32::from_rgb(0xF9, 0x70, 0x66);
 const EMPTY: Color32 = Color32::from_rgb(0x35, 0x3E, 0x4C);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ViewStyle {
+    Modern,
+    Classic,
+}
+
 pub struct MemoryPage {
     hardware: Option<Result<MemoryHardware, String>>,
     hardware_loading: bool,
@@ -35,6 +41,7 @@ pub struct MemoryPage {
     spd_rx: Option<mpsc::Receiver<Result<SpdDocument, String>>>,
     selected_module: usize,
     selected_profile: usize,
+    view_style: ViewStyle,
     available_bytes: u64,
     benchmark_running: bool,
     benchmark_rx: Option<mpsc::Receiver<BenchmarkMessage>>,
@@ -61,6 +68,7 @@ impl MemoryPage {
             spd_rx: None,
             selected_module: 0,
             selected_profile: 0,
+            view_style: ViewStyle::Modern,
             available_bytes: 0,
             benchmark_running: false,
             benchmark_rx: None,
@@ -261,6 +269,27 @@ impl MemoryPage {
     }
 
     fn ui_hardware(&mut self, ui: &mut egui::Ui, hardware: &MemoryHardware, snapshot: &Snapshot) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("视图").size(11.5).color(TEXT_DIM));
+            if profile_tab(ui, self.view_style == ViewStyle::Modern, "新版").clicked() {
+                self.view_style = ViewStyle::Modern;
+            }
+            if profile_tab(ui, self.view_style == ViewStyle::Classic, "经典").clicked() {
+                self.view_style = ViewStyle::Classic;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(
+                    RichText::new(if self.view_style == ViewStyle::Modern {
+                        "专业视图 · 卡片与速度档位"
+                    } else {
+                        "经典视图 · 紧凑表格"
+                    })
+                    .size(11.0)
+                    .color(TEXT_DIM),
+                );
+            });
+        });
+        ui.add_space(8.0);
         let speed = speed_summary(hardware);
         let kind = kind_summary(hardware);
         let slots = hardware
@@ -354,13 +383,16 @@ impl MemoryPage {
             ui,
             "内存条详情",
             "每根内存独立显示，不对混插参数做统一假设",
-            |ui| {
-                for (index, module) in hardware.modules.iter().enumerate() {
-                    if index > 0 {
-                        ui.add_space(8.0);
+            |ui| match self.view_style {
+                ViewStyle::Modern => {
+                    for (index, module) in hardware.modules.iter().enumerate() {
+                        if index > 0 {
+                            ui.add_space(8.0);
+                        }
+                        memory_module_card(ui, module);
                     }
-                    memory_module_card(ui, module);
                 }
+                ViewStyle::Classic => classic_memory_table(ui, &hardware.modules),
             },
         );
     }
@@ -466,26 +498,32 @@ impl MemoryPage {
         let module = &document.modules[self.selected_module];
 
         ui.add_space(10.0);
-        spd_module_summary(ui, module, hardware);
-        ui.add_space(10.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("预设").size(12.0).color(TEXT_DIM));
-            if module.profiles.is_empty() {
-                ui.label(RichText::new("未提供").color(TEXT_DIM));
-            } else {
-                self.selected_profile = self.selected_profile.min(module.profiles.len() - 1);
-                let selected = self.selected_profile;
-                let mut chosen = None;
-                for (index, profile) in module.profiles.iter().enumerate() {
-                    if profile_tab(ui, index == selected, &profile.title).clicked() {
-                        chosen = Some(index);
+        if self.view_style == ViewStyle::Modern {
+            spd_module_pro_panels(ui, module, hardware);
+            ui.add_space(10.0);
+            spd_speed_bins_table(ui, module);
+        } else {
+            spd_module_summary(ui, module, hardware);
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("预设").size(12.0).color(TEXT_DIM));
+                if module.profiles.is_empty() {
+                    ui.label(RichText::new("未提供").color(TEXT_DIM));
+                } else {
+                    self.selected_profile = self.selected_profile.min(module.profiles.len() - 1);
+                    let selected = self.selected_profile;
+                    let mut chosen = None;
+                    for (index, profile) in module.profiles.iter().enumerate() {
+                        if profile_tab(ui, index == selected, &profile.title).clicked() {
+                            chosen = Some(index);
+                        }
+                    }
+                    if let Some(index) = chosen {
+                        self.selected_profile = index;
                     }
                 }
-                if let Some(index) = chosen {
-                    self.selected_profile = index;
-                }
-            }
-        });
+            });
+        }
         if self.selected_profile >= module.profiles.len() {
             self.selected_profile = 0;
         }
@@ -500,26 +538,26 @@ impl MemoryPage {
         if let Some(error) = &module.error {
             ui.colored_label(ORANGE, error);
         }
-        if let Some(profile) = module.profiles.get(self.selected_profile) {
-            ui_profile(ui, module, profile);
-        } else if !module.legacy_timings.is_empty() {
-            ui.add_space(8.0);
-            ui.label(RichText::new("基础 SPD 字段（工具包原始名称与数值）").color(TEXT_MAIN));
-            egui::Grid::new("legacy_spd_timings")
-                .striped(true)
-                .spacing([20.0, 6.0])
-                .show(ui, |ui| {
-                    for timing in &module.legacy_timings {
-                        ui.label(&timing.name);
-                        ui.label(&timing.value);
-                        ui.end_row();
-                    }
-                });
-        } else {
-            ui.label(
-                RichText::new("该内存类型的详细预设暂无法解码，原始 SPD 保留在下方。")
-                    .color(TEXT_DIM),
-            );
+        if self.view_style == ViewStyle::Classic {
+            if let Some(profile) = module.profiles.get(self.selected_profile) {
+                ui_profile(ui, module, profile);
+            } else if !module.legacy_timings.is_empty() {
+                legacy_timing_grid(ui, module);
+            } else {
+                ui.label(
+                    RichText::new("该内存类型的详细预设暂无法解码，原始 SPD 保留在下方。")
+                        .color(TEXT_DIM),
+                );
+            }
+        } else if module.profiles.is_empty() {
+            if module.legacy_timings.is_empty() {
+                ui.label(
+                    RichText::new("该内存类型的详细预设暂无法解码，原始 SPD 保留在下方。")
+                        .color(TEXT_DIM),
+                );
+            } else {
+                legacy_timing_grid(ui, module);
+            }
         }
         if !module.legacy_timings.is_empty() && !module.profiles.is_empty() {
             ui.add_space(6.0);
@@ -563,11 +601,202 @@ impl MemoryPage {
             });
     }
 
+    fn modern_benchmark_panel(
+        ui: &mut egui::Ui,
+        result: Option<&BenchmarkResult>,
+        error: Option<&BenchmarkError>,
+        progress: Option<BenchmarkProgress>,
+        running: bool,
+    ) -> Option<bool> {
+        let mut action = None;
+        egui::Frame::new()
+        .fill(PANEL_BG)
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("内存测速").size(17.0).strong().color(TEXT_MAIN));
+                    ui.label(
+                        RichText::new("顺序吞吐 + 指针追逐延迟 · 多轮中位数")
+                            .size(12.0)
+                            .color(TEXT_DIM),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    tag(ui, "AIDA64 风格", ACCENT);
+                });
+            });
+
+            ui.add_space(10.0);
+            egui::Frame::new()
+                .fill(CARD_BG)
+                .stroke(egui::Stroke::new(1.0_f32, CARD_BORDER))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::Grid::new("aida_style_benchmark")
+                        .num_columns(5)
+                        .spacing([26.0, 12.0])
+                        .show(ui, |ui| {
+                            for title in ["项目", "读取", "写入", "复制", "延迟"] {
+                                ui.label(RichText::new(title).size(11.0).color(TEXT_DIM));
+                            }
+                            ui.end_row();
+                            ui.label(RichText::new("内存").size(14.0).strong().color(TEXT_MAIN));
+                            Self::benchmark_metric(
+                                ui,
+                                result.map(|value| value.read_gib_s),
+                                "GiB/s",
+                                ACCENT,
+                                15.0,
+                            );
+                            Self::benchmark_metric(
+                                ui,
+                                result.map(|value| value.write_gib_s),
+                                "GiB/s",
+                                ORANGE,
+                                15.0,
+                            );
+                            Self::benchmark_metric(
+                                ui,
+                                result.map(|value| value.copy_gib_s),
+                                "GiB/s",
+                                GREEN,
+                                15.0,
+                            );
+                            Self::benchmark_metric(
+                                ui,
+                                result.map(|value| value.latency_ns),
+                                "ns",
+                                Color32::from_rgb(0xE8, 0x9B, 0xFF),
+                                15.0,
+                            );
+                            ui.end_row();
+                        });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("当前测量内存层；L1 / L2 / L3 缓存层级尚未纳入。")
+                            .size(10.5)
+                            .color(TEXT_DIM),
+                    );
+                });
+
+            ui.add_space(8.0);
+            let buffer_text = result
+                .map(|value| {
+                    format!(
+                        "缓冲区 {} × 2 · {} 轮 · 用时 {:.1} 秒",
+                        format_bytes(value.buffer_bytes),
+                        value.samples,
+                        value.elapsed_seconds
+                    )
+                })
+                .unwrap_or_else(|| "缓冲区按当前可用内存自动选择".into());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(buffer_text).size(11.5).color(TEXT_DIM));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if running {
+                        if Self::danger_button(ui, "取消测速").clicked() {
+                            action = Some(false);
+                        }
+                    } else if action_button(ui, if result.is_some() { "重新测速" } else { "开始测速" })
+                        .clicked()
+                    {
+                        action = Some(true);
+                    }
+                });
+            });
+            if let Some(progress) = progress {
+                let fraction = if progress.total == 0 {
+                    0.0
+                } else {
+                    progress.completed as f32 / progress.total as f32
+                };
+                ui.add_space(6.0);
+                ui.add(
+                    egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                        .text(format!("{}  {}/{}", stage_label(progress.stage), progress.completed, progress.total)),
+                );
+            }
+            if let Some(error) = error {
+                ui.add_space(4.0);
+                match error {
+                    BenchmarkError::Cancelled => {
+                        ui.label(RichText::new("测速已取消").size(12.0).color(TEXT_DIM));
+                    }
+                    BenchmarkError::Failed(message) => {
+                        ui.colored_label(RED, message);
+                    }
+                }
+            }
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("结果为本进程实测值，受 CPU、缓存和后台负载影响，不等同于理论带宽或稳定性测试。")
+                    .size(10.5)
+                    .color(TEXT_DIM),
+            );
+        });
+        action
+    }
+
+    fn benchmark_metric(
+        ui: &mut egui::Ui,
+        value: Option<f64>,
+        unit: &str,
+        color: Color32,
+        size: f32,
+    ) {
+        match value {
+            Some(value) => {
+                ui.label(
+                    RichText::new(format!("{value:.1} {unit}"))
+                        .size(size)
+                        .strong()
+                        .color(color),
+                );
+            }
+            None => {
+                ui.label(RichText::new("—").size(size).strong().color(TEXT_DIM));
+            }
+        }
+    }
+
+    fn danger_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+        ui.add(
+            egui::Button::new(RichText::new(text).size(12.0).strong().color(RED))
+                .fill(Color32::from_rgb(0x35, 0x22, 0x28))
+                .stroke(egui::Stroke::new(1.0_f32, RED))
+                .corner_radius(CornerRadius::same(7))
+                .min_size(Vec2::new(0.0, 28.0)),
+        )
+    }
+
     fn ui_benchmark(&mut self, ui: &mut egui::Ui) {
         let result = self.benchmark_result.clone();
         let error = self.benchmark_error.clone();
         let progress = self.benchmark_progress;
         let mut action = None;
+        if self.view_style == ViewStyle::Modern {
+            match Self::modern_benchmark_panel(
+                ui,
+                result.as_ref(),
+                error.as_ref(),
+                progress,
+                self.benchmark_running,
+            ) {
+                Some(true) => self.start_benchmark(ui.ctx()),
+                Some(false) => {
+                    if let Some(cancel) = &self.benchmark_cancel {
+                        cancel.store(true, Ordering::Release);
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
         egui::Frame::new()
             .fill(PANEL_BG)
             .corner_radius(CornerRadius::same(8))
@@ -626,6 +855,7 @@ impl MemoryPage {
                             benchmark_row(ui, "顺序读取", result.read_gib_s, ACCENT);
                             benchmark_row(ui, "顺序写入", result.write_gib_s, ORANGE);
                             benchmark_row(ui, "内存复制", result.copy_gib_s, GREEN);
+                            benchmark_latency_row(ui, "内存延迟", result.latency_ns);
                             ui.add_space(4.0);
                             ui.label(
                                 RichText::new(format!(
@@ -746,6 +976,66 @@ fn memory_module_card(ui: &mut egui::Ui, module: &MemoryModule) {
                 metric(&mut columns[1], "型号", nonempty(&module.part_number));
                 metric_mono(&mut columns[2], "序列号", nonempty(&module.serial_number));
             });
+        });
+}
+
+fn classic_memory_table(ui: &mut egui::Ui, modules: &[MemoryModule]) {
+    egui::Grid::new("classic_memory_module_details")
+        .num_columns(7)
+        .striped(true)
+        .spacing([14.0, 8.0])
+        .show(ui, |ui| {
+            for title in [
+                "插槽 / Bank",
+                "容量",
+                "规格",
+                "当前 / 标称",
+                "厂商",
+                "型号",
+                "电压",
+            ] {
+                ui.label(RichText::new(title).size(12.5).color(TEXT_DIM));
+            }
+            ui.end_row();
+            for module in modules {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(nonempty(&module.device_locator)).color(TEXT_MAIN));
+                    if !module.bank_label.trim().is_empty() {
+                        ui.label(RichText::new(&module.bank_label).size(11.5).color(TEXT_DIM));
+                    }
+                });
+                ui.label(format_bytes(module.capacity));
+                ui.vertical(|ui| {
+                    ui.label(nonempty_opt(&module.memory_type));
+                    if let Some(form) = &module.form_factor {
+                        ui.label(RichText::new(form).size(11.5).color(TEXT_DIM));
+                    }
+                });
+                ui.label(format!(
+                    "{} / {}",
+                    rate(module.configured_speed_mt_s),
+                    rate(module.speed_mt_s)
+                ));
+                ui.label(nonempty(&module.manufacturer));
+                ui.vertical(|ui| {
+                    ui.label(nonempty(&module.part_number));
+                    if !module.serial_number.trim().is_empty() {
+                        ui.label(
+                            RichText::new(format!("SN {}", module.serial_number.trim()))
+                                .size(10.5)
+                                .monospace()
+                                .color(TEXT_DIM),
+                        );
+                    }
+                });
+                ui.label(
+                    module
+                        .voltage_mv
+                        .map(|v| format!("{:.3} V", v as f64 / 1000.0))
+                        .unwrap_or_else(|| "未提供".into()),
+                );
+                ui.end_row();
+            }
         });
 }
 
@@ -908,6 +1198,264 @@ fn spd_module_summary(ui: &mut egui::Ui, module: &SpdModule, hardware: Option<&M
                 metric_mono(&mut columns[1], "序列号", nonempty(&module.serial_number));
                 metric(&mut columns[2], "对应插槽", slot);
             });
+        });
+}
+
+fn spd_module_pro_panels(ui: &mut egui::Ui, module: &SpdModule, hardware: Option<&MemoryHardware>) {
+    let slot = hardware
+        .and_then(|hardware| matching_slot(module, &hardware.modules))
+        .unwrap_or("未关联插槽");
+    let first_profile = module.profiles.first();
+    let core = first_profile
+        .map(|profile| profile.core_timings.as_str())
+        .filter(|value| *value != "未提供")
+        .unwrap_or("—");
+    let data_rate = first_profile
+        .and_then(|profile| profile.data_rate_mt_s)
+        .map(|rate| format!("{}{} MT/s", memory_type_prefix(&module.memory_type), rate))
+        .unwrap_or_else(|| "—".into());
+    let input_clock = first_profile
+        .and_then(|profile| profile_time(profile, "tCK"))
+        .unwrap_or("—")
+        .to_owned();
+    let voltage = module
+        .profiles
+        .iter()
+        .map(|profile| profile.voltage_summary.clone())
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "—".into());
+    let cas = legacy_value(module, "CASLatenciesSupported")
+        .map(str::to_owned)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "—".into());
+
+    let module_rows = vec![
+        ("厂商".to_owned(), nonempty(&module.manufacturer).to_owned()),
+        ("型号".to_owned(), nonempty(&module.part_number).to_owned()),
+        (
+            "序列号".to_owned(),
+            nonempty(&module.serial_number).to_owned(),
+        ),
+        (
+            "容量".to_owned(),
+            if module.capacity_gb > 0.0 {
+                format!("{:.1} GB", module.capacity_gb)
+            } else {
+                "—".to_owned()
+            },
+        ),
+        ("类型".to_owned(), display_memory_type(&module.memory_type)),
+        ("插槽".to_owned(), slot.to_owned()),
+        (
+            "总线 / 地址".to_owned(),
+            format!("{} / 0x{:02X}", bus_label(module), module.address),
+        ),
+    ];
+    let component_rows = vec![
+        (
+            "DRAM 颗粒".to_owned(),
+            nonempty(&module.dram_manufacturer).to_owned(),
+        ),
+        ("核心时序".to_owned(), core.to_owned()),
+        ("数据率".to_owned(), data_rate),
+        ("输入时钟".to_owned(), input_clock),
+        ("读取延迟".to_owned(), cas),
+        ("供电".to_owned(), voltage),
+        (
+            "SPD 档位".to_owned(),
+            format!("{} 个已解析", module.profiles.len()),
+        ),
+    ];
+
+    ui.columns(2, |columns| {
+        pro_panel(&mut columns[0], "内存模块", &module_rows);
+        pro_panel(&mut columns[1], "DRAM 组件", &component_rows);
+    });
+}
+
+fn pro_panel(ui: &mut egui::Ui, title: &str, rows: &[(String, String)]) {
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .stroke(egui::Stroke::new(1.0_f32, CARD_BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(title).size(13.0).strong().color(TEXT_MAIN));
+            ui.add_space(6.0);
+            for (label, value) in rows {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).size(10.5).color(TEXT_DIM));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(value).size(11.5).color(TEXT_MAIN));
+                    });
+                });
+                ui.add_space(2.0);
+            }
+        });
+}
+
+fn spd_speed_bins_table(ui: &mut egui::Ui, module: &SpdModule) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("速度档位")
+                .size(14.0)
+                .strong()
+                .color(TEXT_MAIN),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new("已解析的 JEDEC / XMP / EXPO 档位")
+                    .size(10.5)
+                    .color(TEXT_DIM),
+            );
+        });
+    });
+    ui.add_space(6.0);
+    egui::Frame::new()
+        .fill(CARD_BG)
+        .stroke(egui::Stroke::new(1.0_f32, CARD_BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            if module.profiles.is_empty() {
+                ui.label(RichText::new("未提供可用档位").size(12.0).color(TEXT_DIM));
+                return;
+            }
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                egui::Grid::new("spd_speed_bins")
+                    .num_columns(13)
+                    .striped(true)
+                    .spacing([7.0, 5.0])
+                    .min_col_width(18.0)
+                    .show(ui, |ui| {
+                        for title in [
+                            "配置", "频率", "CL", "RCD", "RP", "RAS", "RC", "FAW", "RRD_S",
+                            "RRD_L", "WR", "WTR_S", "WTR_L",
+                        ] {
+                            ui.label(RichText::new(title).size(9.5).color(TEXT_DIM));
+                        }
+                        ui.end_row();
+                        for profile in &module.profiles {
+                            let core = core_parts(profile);
+                            let frequency = profile
+                                .data_rate_mt_s
+                                .map(|rate| {
+                                    format!("{}{}", memory_type_prefix(&module.memory_type), rate)
+                                })
+                                .unwrap_or_else(|| "—".into());
+                            let cells = [
+                                short_profile_title(&profile.title),
+                                frequency,
+                                core.first().copied().unwrap_or("—").to_owned(),
+                                core.get(1).copied().unwrap_or("—").to_owned(),
+                                core.get(2).copied().unwrap_or("—").to_owned(),
+                                core.get(3).copied().unwrap_or("—").to_owned(),
+                                compact_cycles(profile_value(profile, "tRC")),
+                                compact_cycles(profile_value(profile, "tFAW")),
+                                compact_cycles(
+                                    profile_value(profile, "tRRD_S")
+                                        .or_else(|| profile_value(profile, "tRRD")),
+                                ),
+                                compact_cycles(profile_value(profile, "tRRD_L")),
+                                compact_cycles(profile_value(profile, "tWR")),
+                                compact_cycles(
+                                    profile_value(profile, "tWTR_S")
+                                        .or_else(|| profile_value(profile, "tWTR")),
+                                ),
+                                compact_cycles(profile_value(profile, "tWTR_L")),
+                            ];
+                            for (index, cell) in cells.into_iter().enumerate() {
+                                let text = RichText::new(cell).size(9.5);
+                                if index < 2 {
+                                    ui.label(text.color(TEXT_MAIN));
+                                } else {
+                                    ui.label(text.monospace().color(TEXT_MAIN));
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        });
+}
+
+fn short_profile_title(title: &str) -> String {
+    let upper = title.to_ascii_uppercase();
+    let base = if upper.contains("JEDEC") {
+        "JEDEC"
+    } else if upper.contains("XMP") {
+        "XMP"
+    } else if upper.contains("EXPO") {
+        "EXPO"
+    } else {
+        return nonempty(title).to_owned();
+    };
+    let suffix = title
+        .split_whitespace()
+        .last()
+        .filter(|value| value.chars().all(|character| character.is_ascii_digit()));
+    match suffix {
+        Some(number) => format!("{base} {number}"),
+        None => base.to_owned(),
+    }
+}
+
+fn core_parts(profile: &TimingProfile) -> Vec<&str> {
+    if profile.core_timings == "未提供" {
+        Vec::new()
+    } else {
+        profile.core_timings.split('-').collect()
+    }
+}
+
+fn profile_value<'a>(profile: &'a TimingProfile, parameter: &str) -> Option<&'a str> {
+    profile
+        .rows
+        .iter()
+        .find(|row| row.parameter == parameter)
+        .map(|row| row.cycles.as_str())
+}
+
+fn profile_time<'a>(profile: &'a TimingProfile, parameter: &str) -> Option<&'a str> {
+    profile
+        .rows
+        .iter()
+        .find(|row| row.parameter == parameter)
+        .map(|row| row.time.as_str())
+}
+
+fn compact_cycles(value: Option<&str>) -> String {
+    let Some(value) = value else {
+        return "—".into();
+    };
+    let value = value.trim();
+    if value.is_empty() || value == "未提供" {
+        return "—".into();
+    }
+    value.split('（').next().unwrap_or(value).trim().to_owned()
+}
+
+fn legacy_value<'a>(module: &'a SpdModule, name: &str) -> Option<&'a str> {
+    module
+        .legacy_timings
+        .iter()
+        .find(|timing| timing.name == name)
+        .map(|timing| timing.value.as_str())
+}
+
+fn legacy_timing_grid(ui: &mut egui::Ui, module: &SpdModule) {
+    ui.add_space(8.0);
+    ui.label(RichText::new("基础 SPD 字段（工具包原始名称与数值）").color(TEXT_MAIN));
+    egui::Grid::new("legacy_spd_timings")
+        .striped(true)
+        .spacing([20.0, 6.0])
+        .show(ui, |ui| {
+            for timing in &module.legacy_timings {
+                ui.label(&timing.name);
+                ui.label(&timing.value);
+                ui.end_row();
+            }
         });
 }
 
@@ -1153,6 +1701,20 @@ fn benchmark_row(ui: &mut egui::Ui, label: &str, value: f64, color: Color32) {
     });
 }
 
+fn benchmark_latency_row(ui: &mut egui::Ui, label: &str, value: f64) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(13.0).color(TEXT_DIM));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("{value:.1} ns"))
+                    .size(19.0)
+                    .strong()
+                    .color(Color32::from_rgb(0xE8, 0x9B, 0xFF)),
+            );
+        });
+    });
+}
+
 fn speed_summary(hardware: &MemoryHardware) -> (String, String) {
     let total = hardware.modules.len();
     let mut values: Vec<u32> = hardware
@@ -1301,6 +1863,7 @@ fn stage_label(stage: BenchmarkStage) -> &'static str {
         BenchmarkStage::Read => "顺序读取",
         BenchmarkStage::Write => "顺序写入",
         BenchmarkStage::Copy => "内存复制",
+        BenchmarkStage::Latency => "内存延迟",
     }
 }
 
